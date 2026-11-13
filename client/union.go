@@ -51,7 +51,10 @@ func (*fsCPIO) Chroot(_ string) (billy.Filesystem, error) {
 }
 
 // Root implements billy.Root
-func (*fsCPIO) Root() string {
+func (f *fsCPIO) Root() string {
+	if len(f.mnts) > 0 {
+		return f.mnts[0].fs.Root()
+	}
 	return "/" // do not use os.PathSeparator; this is cpio.
 }
 
@@ -749,7 +752,15 @@ func SrvNFS(cl *Cmd, n string, dir string) (func() error, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	handler := NewNullAuthHandler(l, COS{mem}, u.String())
+	var fs billy.Filesystem = COS{mem}
+	if !cl.UnsafeExport {
+		remotes, err := ParseBindRemotes(cl.NameSpace)
+		if err != nil {
+			return nil, "", err
+		}
+		fs = NewFilterFS(fs, remotes)
+	}
+	handler := NewNullAuthHandler(l, fs, u.String())
 	verbose("uuid is %q", u.String())
 	cacheHelper := nfshelper.NewCachingHandler(handler, 1024*1024)
 	f := func() error {

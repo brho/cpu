@@ -47,6 +47,8 @@ func command(n string, args ...string) *exec.Cmd {
 	// This meant we could remove ALL calls of unshare and mount from cpud.
 	// Fun fact: I wrote that fix years ago, and then forgot to remove
 	// the support code from cpu. Oops.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
+	if os.Getuid() == 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
+	}
 	return cmd
 }

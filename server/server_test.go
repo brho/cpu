@@ -125,9 +125,12 @@ func TestDaemonConnectHelper(t *testing.T) {
 var (
 	args   []string
 	port9p string
+	remote bool
 )
 
 func TestMain(m *testing.M) {
+	flag.BoolVar(&remote, "remote", false, "remote helper process")
+	flag.StringVar(&port9p, "port9p", "", "port9p on remote machine for 9p mount")
 	// Strip out the args after --
 	x := -1
 	var osargs = os.Args
