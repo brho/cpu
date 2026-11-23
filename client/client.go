@@ -472,10 +472,6 @@ func (c *Cmd) Start() error {
 	if c.SessionIn, err = c.session.StdinPipe(); err != nil {
 		return err
 	}
-	c.closers = append([]func() error{func() error {
-		c.SessionIn.Close()
-		return nil
-	}}, c.closers...)
 
 	if c.SessionOut, err = c.session.StdoutPipe(); err != nil {
 		return err
@@ -527,8 +523,8 @@ func (c *Cmd) Start() error {
 			}
 		}()
 	}
+	verbose("set up copying to c.Stdout")
 	go func() {
-		verbose("set up copying to c.Stdout")
 		if _, err := io.Copy(c.Stdout, c.SessionOut); err != nil && !errors.Is(err, io.EOF) {
 			log.Printf("copying stdout: %v", err)
 		}
@@ -540,12 +536,12 @@ func (c *Cmd) Start() error {
 			c.Stdout.Close()
 		}
 	}()
+	verbose("set up copying to c.Stderr")
 	go func() {
-		verbose("set up copying to c.Stderr")
 		if _, err := io.Copy(c.Stderr, c.SessionErr); err != nil && !errors.Is(err, io.EOF) {
 			log.Printf("copying stderr: %v", err)
 		}
-		if !sameFD(c.Stdout, os.Stderr) {
+		if !sameFD(c.Stderr, os.Stderr) {
 			c.Stderr.Close()
 		}
 	}()
