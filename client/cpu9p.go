@@ -14,6 +14,7 @@ import (
 
 const (
 	// 9P2000.L wire open flags (Linux include/net/9p/9p.h).
+	p9DotlCreate p9.OpenFlags = 0o0000100
 	p9DotlTrunc  p9.OpenFlags = 0o0001000
 	p9DotlAppend p9.OpenFlags = 0o0002000
 	p9DotlDSync  p9.OpenFlags = 0o0010000

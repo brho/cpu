@@ -53,3 +53,16 @@ func TestCmdWithDisablePrivateKey(t *testing.T) {
 		t.Fatal("WithDisablePrivateKey(true) should set DisablePrivateKey to true, got false")
 	}
 }
+
+func TestWithUnsafeExportOption(t *testing.T) {
+	c := Command("host", "ls")
+	if c.UnsafeExport {
+		t.Fatalf("default UnsafeExport = true, want false")
+	}
+	if err := WithUnsafeExport(true)(c); err != nil {
+		t.Fatalf("WithUnsafeExport(true): %v", err)
+	}
+	if !c.UnsafeExport {
+		t.Fatalf("UnsafeExport after WithUnsafeExport(true) = false, want true")
+	}
+}

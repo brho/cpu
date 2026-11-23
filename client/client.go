@@ -72,6 +72,9 @@ type Cmd struct {
 	FSTab string
 	// Ninep determines if client will run a 9P server
 	Ninep bool
+	// UnsafeExport exports all of Root rather than restricting the export
+	// to paths in NameSpace.
+	UnsafeExport bool
 
 	nonce      nonce
 	network    string // This is a variable but we expect it will always be tcp
@@ -245,6 +248,15 @@ func WithRoot(root string) Set {
 	}
 }
 
+// WithUnsafeExport controls whether the client exports all of Root rather than
+// restricting the export to paths in NameSpace.
+func WithUnsafeExport(unsafe bool) Set {
+	return func(c *Cmd) error {
+		c.UnsafeExport = unsafe
+		return nil
+	}
+}
+
 // WithNetwork sets the network. This almost never needs
 // to be set, save for vsock.
 func WithNetwork(network string) Set {
@@ -376,7 +388,15 @@ func (c *Cmd) Dial() error {
 	// or variants. This lets us use a listen deadline.
 	if c.Ninep {
 		if c.fileServer == nil {
-			c.fileServer = NewCPU9P(c.Root)
+			attacher := NewCPU9P(c.Root)
+			if !c.UnsafeExport {
+				remotes, err := ParseBindRemotes(c.NameSpace)
+				if err != nil {
+					return err
+				}
+				attacher = NewFilter9P(attacher, remotes)
+			}
+			c.fileServer = attacher
 		}
 		l, err := cl.Listen("tcp", "127.0.0.1:0")
 		if err != nil {

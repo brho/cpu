@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -90,6 +91,33 @@ func TestParseBinds(t *testing.T) {
 			for i := range w {
 				t.Logf("%d:%q", i, w[i])
 			}
+		}
+	}
+}
+
+func TestParseBindRemotes(t *testing.T) {
+	for _, tt := range []struct {
+		namespace string
+		want      []string
+		err       error
+	}{
+		{namespace: "", want: nil, err: nil},
+		{namespace: "/lib", want: []string{"/lib"}, err: nil},
+		{namespace: "/lib=/arm/lib", want: []string{"/arm/lib"}, err: nil},
+		{namespace: "/lib=/arm/lib:/bin", want: []string{"/arm/lib", "/bin"}, err: nil},
+		{namespace: "/lib=/arm/lib:/bin=/b/bin", want: []string{"/arm/lib", "/b/bin"}, err: nil},
+		{namespace: "/a:/bin==/b/bin", want: []string{"/a", "=/b/bin"}, err: nil},
+		{namespace: "/lib=:/bin=/b/bin", want: nil, err: strconv.ErrSyntax},
+		{namespace: "=/lib:/bin=/b/bin", want: nil, err: strconv.ErrSyntax},
+		{namespace: "/a::/bin=/b/bin", want: nil, err: strconv.ErrSyntax},
+	} {
+		got, err := ParseBindRemotes(tt.namespace)
+		if !errors.Is(err, tt.err) {
+			t.Errorf("ParseBindRemotes(%q) error = %v, want %v", tt.namespace, err, tt.err)
+			continue
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("ParseBindRemotes(%q) = %v, want %v", tt.namespace, got, tt.want)
 		}
 	}
 }
