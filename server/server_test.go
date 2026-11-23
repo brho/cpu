@@ -7,17 +7,22 @@ package server
 import (
 	"bytes"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gliderlabs/ssh"
 	"github.com/u-root/cpu/session"
 )
+
+func setTestVerbose(t *testing.T) {
+	t.Helper()
+	prev := v
+	v = t.Logf
+	t.Cleanup(func() { v = prev })
+}
 
 func TestNewServer(t *testing.T) {
 	s, err := New("key.pub", "", os.Args[0])
@@ -45,7 +50,7 @@ func TestRemoteNoNameSpace(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skipf("Skipping as we are not root")
 	}
-	v = t.Logf
+	setTestVerbose(t)
 	s := session.New("", "date")
 	o, e := &bytes.Buffer{}, &bytes.Buffer{}
 	s.Stdin, s.Stdout, s.Stderr = nil, o, e
@@ -61,32 +66,8 @@ func TestRemoteNoNameSpace(t *testing.T) {
 	}
 }
 
-func gendotssh(dir, config string) (string, error) {
-	dotssh := filepath.Join(dir, ".ssh")
-	if err := os.MkdirAll(dotssh, 0700); err != nil {
-		return "", err
-	}
-
-	// https://github.com/kevinburke/ssh_config/issues/2
-	hackconfig := fmt.Sprintf(string(sshConfig), filepath.Join(dir, ".ssh"))
-	for _, f := range []struct {
-		name string
-		val  []byte
-	}{
-		{name: "config", val: []byte(hackconfig)},
-		{name: "hostkey", val: hostKey},
-		{name: "server", val: privateKey},
-		{name: "server.pub", val: publicKey},
-	} {
-		if err := os.WriteFile(filepath.Join(dotssh, f.name), f.val, 0644); err != nil {
-			return "", err
-		}
-	}
-	return hackconfig, nil
-}
-
 func TestDaemonStart(t *testing.T) {
-	v = t.Logf
+	setTestVerbose(t)
 	s, err := New("", "", os.Args[0])
 	if err != nil {
 		t.Fatalf(`New("", "", %q): %v != nil`, os.Args[0], err)
@@ -128,6 +109,10 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// server.handler prepends -remote and client.Start prepends -port9p
+	// before the test flags when re-execing the test binary.
+	flag.Bool("remote", false, "remote helper process")
+	flag.StringVar(&port9p, "port9p", "", "port9p on remote machine for 9p mount")
 	// Strip out the args after --
 	x := -1
 	var osargs = os.Args
@@ -140,11 +125,6 @@ func TestMain(m *testing.M) {
 			osargs = os.Args[:i]
 			x = i
 		}
-	}
-	// Process any port9p directive
-	if len(args) > 1 && args[0] == "-port9p" {
-		port9p = args[1]
-		args = args[2:]
 	}
 	os.Args = osargs
 	// log.Printf("os.Args %v, args %v", os.Args, args)

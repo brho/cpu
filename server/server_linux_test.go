@@ -2,18 +2,24 @@ package server
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
-	"io"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
 	"testing"
 
+	"github.com/gliderlabs/ssh"
 	config "github.com/kevinburke/ssh_config"
 	"github.com/u-root/cpu/client"
+	xssh "golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 )
 
@@ -66,24 +72,124 @@ func TestPrivateNameSpace(t *testing.T) {
 	}
 }
 
+// Why %s and not %d?
+// https://github.com/kevinburke/ssh_config/issues/2
+// ssh_config does not do any of the % stuff yet.
+// So we have to rewrite this with the full path.
+const sshConfig = `
+Host server
+	HostName localhost
+	Port 2222
+	User root
+	IdentityFile %s/server
+`
+
+func genTestSSHKey(t *testing.T) (privPEM, pubAuth []byte) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+	block, err := xssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("MarshalPrivateKey: %v", err)
+	}
+	sshPub, err := xssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatalf("NewPublicKey: %v", err)
+	}
+	return pem.EncodeToMemory(block), xssh.MarshalAuthorizedKey(sshPub)
+}
+
+func gendotssh(t *testing.T, dir string) string {
+	t.Helper()
+	dotssh := filepath.Join(dir, ".ssh")
+	if err := os.MkdirAll(dotssh, 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", dotssh, err)
+	}
+
+	clientPriv, clientPub := genTestSSHKey(t)
+	hostPriv, _ := genTestSSHKey(t)
+
+	// https://github.com/kevinburke/ssh_config/issues/2
+	hackconfig := fmt.Sprintf(sshConfig, dotssh)
+	for _, f := range []struct {
+		name string
+		val  []byte
+		mode os.FileMode
+	}{
+		{name: "config", val: []byte(hackconfig), mode: 0o644},
+		{name: "hostkey", val: hostPriv, mode: 0o600},
+		{name: "server", val: clientPriv, mode: 0o600},
+		{name: "server.pub", val: clientPub, mode: 0o644},
+	} {
+		p := filepath.Join(dotssh, f.name)
+		if err := os.WriteFile(p, f.val, f.mode); err != nil {
+			t.Fatalf("WriteFile(%q): %v", p, err)
+		}
+	}
+	return hackconfig
+}
+
+func serveTestSSH(t *testing.T, s *ssh.Server, ln net.Listener) {
+	t.Helper()
+	// gliderlabs/ssh does not wait for active session handlers on Close,
+	// so gate and track s.Handler under mu/wg to drain before teardown.
+	var (
+		mu     sync.Mutex
+		closed bool
+		wg     sync.WaitGroup
+	)
+	origHandler := s.Handler
+	s.Handler = func(sess ssh.Session) {
+		mu.Lock()
+		if closed {
+			mu.Unlock()
+			return
+		}
+		wg.Add(1)
+		mu.Unlock()
+		defer wg.Done()
+		origHandler(sess)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, ssh.ErrServerClosed) {
+			t.Errorf("s.Serve(): %v != nil", err)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = s.Close()
+		mu.Lock()
+		closed = true
+		mu.Unlock()
+		wg.Wait()
+	})
+}
+
 // Now the fun begins. We have to be a demon.
 func TestDaemonSession(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skipf("Skipping as we are not root")
 	}
 
-	runtime.GOMAXPROCS(1)
-	v = t.Logf
+	setTestVerbose(t)
+	prevProcs := runtime.GOMAXPROCS(1)
+	client.SetVerbose(t.Logf)
+	t.Cleanup(func() {
+		client.SetVerbose(func(string, ...any) {})
+		runtime.GOMAXPROCS(prevProcs)
+	})
+
 	d := t.TempDir()
 	t.Logf("tempdir is %q", d)
 	if err := os.Setenv("HOME", d); err != nil {
 		t.Fatalf(`os.Setenv("HOME", %s): %v != nil`, d, err)
 	}
 	dotSSH := filepath.Join(d, ".ssh")
-	hackconfig, err := gendotssh(d, string(sshConfig))
-	if err != nil {
-		t.Fatalf(`gendotssh(%s): %v != nil`, d, err)
-	}
+	hackconfig := gendotssh(t, d)
 
 	pubKey := filepath.Join(dotSSH, "server.pub")
 	s, err := New(pubKey, "", os.Args[0])
@@ -103,12 +209,7 @@ func TestDaemonSession(t *testing.T) {
 	// and client in line, e.g.
 	// socket/bind/listen/connect/accept
 	// oh well.
-	go func(t *testing.T) {
-		if err := s.Serve(ln); err != nil {
-			t.Errorf("s.Daemon(): %v != nil", err)
-		}
-	}(t)
-	v = t.Logf
+	serveTestSSH(t, s, ln)
 	// From this test forward, at least try to get a port.
 	// For this test, there must be a key.
 	// hack for lack in ssh_config
@@ -131,11 +232,12 @@ func TestDaemonSession(t *testing.T) {
 	}
 
 	t.Logf("HostName %q, IdentityFile %q, command %v", host, kf, os.Args[0])
-	client.SetVerbose(t.Logf)
-	c := client.Command(host, os.Args[0], "-remote", "ls", "-l")
-	if err := c.SetOptions(client.WithPrivateKeyFile(kf), client.WithPort(port), client.WithRoot(d), client.WithNameSpace(d)); err != nil {
+	c := client.Command(host, "-test.run", "TestDaemonConnectHelper", "-test.v", "--", "ls", "-l")
+	if err := c.SetOptions(client.WithPrivateKeyFile(kf), client.WithPort(port), client.WithRoot(d), client.WithNameSpace("")); err != nil {
 		t.Fatalf("SetOptions: %v != nil", err)
 	}
+	c.Stdin = bytes.NewReader(nil)
+	c.Env = append(os.Environ(), "GO_WANT_DAEMON_HELPER_PROCESS=1")
 	if err := c.Dial(); err != nil {
 		t.Fatalf("Dial: got %v, want nil", err)
 	}
@@ -147,9 +249,6 @@ func TestDaemonSession(t *testing.T) {
 			t.Fatalf("Close: got %v, want nil", err)
 		}
 	}()
-	if err := c.SessionIn.Close(); err != nil && !errors.Is(err, io.EOF) {
-		t.Errorf("Close stdin: Got %v, want nil", err)
-	}
 	if err := c.Wait(); err != nil {
 		t.Fatalf("Wait: got %v, want nil", err)
 	}
@@ -166,16 +265,14 @@ func TestDaemonConnect(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skipf("Skipping as we are not root")
 	}
+	setTestVerbose(t)
+
 	d := t.TempDir()
 	if err := os.Setenv("HOME", d); err != nil {
 		t.Fatalf(`os.Setenv("HOME", %s): %v != nil`, d, err)
 	}
-	hackconfig, err := gendotssh(d, string(sshConfig))
-	if err != nil {
-		t.Fatalf(`gendotssh(%s): %v != nil`, d, err)
-	}
+	hackconfig := gendotssh(t, d)
 
-	v = t.Logf
 	s, err := New(filepath.Join(d, ".ssh", "server.pub"), filepath.Join(d, ".ssh", "hostkey"), os.Args[0])
 	if err != nil {
 		t.Fatalf(`New(%q, %q, %q): %v != nil`, filepath.Join(d, ".ssh", "server.pub"), filepath.Join(d, ".ssh", "hostkey"), os.Args[0], err)
@@ -186,10 +283,6 @@ func TestDaemonConnect(t *testing.T) {
 		t.Fatalf(`net.Listen("", ""): %v != nil`, err)
 	}
 	t.Logf("Listening on %v", ln.Addr())
-	_, port, err := net.SplitHostPort(ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
 	// this is a racy test.
 	// The ssh package really ought to allow you to accept
 	// on a socket and then call with that socket. This would be
@@ -197,12 +290,11 @@ func TestDaemonConnect(t *testing.T) {
 	// and client in line, e.g.
 	// socket/bind/listen/connect/accept
 	// oh well.
-	go func(t *testing.T) {
-		if err := s.Serve(ln); err != nil {
-			t.Errorf("s.Daemon(): %v != nil", err)
-		}
-	}(t)
-	v = t.Logf
+	serveTestSSH(t, s, ln)
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
 	// From this test forward, at least try to get a port.
 	// For this test, there must be a key.
 	// hack for lack in ssh_config
@@ -221,11 +313,12 @@ func TestDaemonConnect(t *testing.T) {
 		t.Fatalf(`cfg.Get("server", "IdentityFile"): (%q, %v) != (afilename, nil`, kf, err)
 	}
 	t.Logf("HostName %q, IdentityFile %q", host, kf)
-	c := client.Command(host, os.Args[0]+" -test.run TestDaemonConnectHelper -test.v --", "date")
+	c := client.Command(host, "-test.run", "TestDaemonConnectHelper", "-test.v", "--", "date")
 	if err := c.SetOptions(client.WithPrivateKeyFile(kf), client.WithPort(port), client.WithRoot("/"), client.WithNameSpace("")); err != nil {
 		t.Fatalf("SetOptions: %v != nil", err)
 	}
-	c.Env = append(c.Env, "GO_WANT_DAEMON_HELPER_PROCESS=1")
+	c.Stdin = bytes.NewReader(nil)
+	c.Env = append(os.Environ(), "GO_WANT_DAEMON_HELPER_PROCESS=1")
 	if err := c.Dial(); err != nil {
 		t.Fatalf("Dial: got %v, want nil", err)
 	}
@@ -237,9 +330,6 @@ func TestDaemonConnect(t *testing.T) {
 			t.Fatalf("Close: got %v, want nil", err)
 		}
 	}()
-	if err := c.SessionIn.Close(); err != nil && !errors.Is(err, io.EOF) {
-		t.Errorf("Close stdin: Got %v, want nil", err)
-	}
 	if err := c.Wait(); err != nil {
 		t.Fatalf("Wait: got %v, want nil", err)
 	}
