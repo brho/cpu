@@ -39,6 +39,11 @@ func init() {
 	}
 }
 
+// unshareMountNS controls whether session helpers unshare their mount
+// namespace. Production always keeps this true (fail-closed); unprivileged
+// tests that spawn non-mounting helpers override it.
+var unshareMountNS = true
+
 func command(n string, args ...string) *exec.Cmd {
 	cmd := exec.Command(n, args...)
 	// N.B.: in the go runtime, after not long ago, CLONE_NEWNS in the Unshareflags
@@ -47,6 +52,8 @@ func command(n string, args ...string) *exec.Cmd {
 	// This meant we could remove ALL calls of unshare and mount from cpud.
 	// Fun fact: I wrote that fix years ago, and then forgot to remove
 	// the support code from cpu. Oops.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
+	if unshareMountNS {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
+	}
 	return cmd
 }
