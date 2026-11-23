@@ -50,8 +50,14 @@ func (*fsCPIO) Chroot(_ string) (billy.Filesystem, error) {
 	return nil, os.ErrInvalid
 }
 
-// Root implements billy.Root
-func (*fsCPIO) Root() string {
+// Root implements billy.Root.
+func (f *fsCPIO) Root() string {
+	// mnts[0] is the primary OS mount passed to NewfsCPIO (matching
+	// hasMount). COS.{Chmod,Chown,Lchown,Chtimes} open os.OpenRoot(Root()),
+	// so returning it targets -root rather than "/".
+	if len(f.mnts) > 0 {
+		return f.mnts[0].fs.Root()
+	}
 	return "/" // do not use os.PathSeparator; this is cpio.
 }
 
@@ -703,6 +709,44 @@ func (l *file) Readlink() (string, error) {
 	return string(link), nil
 }
 
+func newNFSFS(cpioPath, dir, namespace string, unsafeExport bool) (billy.Filesystem, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("empty root directory: %w", os.ErrInvalid)
+	}
+	var remotes []string
+	if !unsafeExport {
+		var err error
+		remotes, err = ParseBindRemotes(namespace)
+		if err != nil {
+			return nil, err
+		}
+	}
+	osfs := NewOSFS(dir)
+	// Verify the root exists as a directory before setting up CPIO or
+	// listening for NFS connections.
+	root := osfs.Root()
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	_ = r.Close()
+	// The osfs root is absolute, so compute mdir relative to its volume
+	// root (supporting both Unix and Windows, as well as relative dir).
+	mdir, err := filepath.Rel(filepath.VolumeName(root)+string(filepath.Separator), root)
+	if err != nil {
+		return nil, err
+	}
+	verbose("Create New OSFS @ %q with relative mount %q", dir, mdir)
+	mem, err := NewfsCPIO(cpioPath, WithMount(mdir, osfs))
+	if err != nil {
+		return nil, err
+	}
+	if !unsafeExport {
+		return NewFilterFS(COS{mem}, remotes), nil
+	}
+	return COS{mem}, nil
+}
+
 // SrvNFS sets up an nfs server. n, which
 // can be empty, names a CPIO file for the "backing root".
 // dir is used for a root, or possibly limited to $HOME.
@@ -710,15 +754,11 @@ func (l *file) Readlink() (string, error) {
 // This API will change if needs dictate.
 // So far its simplicity has been sufficient.
 func SrvNFS(cl *Cmd, n string, dir string) (func() error, string, error) {
-	// The osnfs will be absolute, so the mountdir has to be
-	// relative to the osnfs
-	mdir, err := filepath.Rel("/", dir)
+	fs, err := newNFSFS(n, dir, cl.NameSpace, cl.UnsafeExport)
 	if err != nil {
 		return nil, "", err
 	}
-	osfs := NewOSFS(dir)
-	verbose("Create New OSFS @ %q with relative mount %q", dir, mdir)
-	mem, err := NewfsCPIO(n, WithMount(mdir, osfs))
+	u, err := uuid.NewRandom()
 	if err != nil {
 		return nil, "", err
 	}
@@ -737,19 +777,17 @@ func SrvNFS(cl *Cmd, n string, dir string) (func() error, string, error) {
 	verbose("ssh.listener %v", l.Addr().String())
 	ap := strings.Split(l.Addr().String(), ":")
 	if len(ap) == 0 {
+		_ = l.Close()
 		return nil, "", fmt.Errorf("SrvNFS:Can't find a port number in %v", l.Addr().String())
 	}
 	portnfs, err := strconv.ParseUint(ap[len(ap)-1], 0, 16)
 	if err != nil {
+		_ = l.Close()
 		return nil, "", fmt.Errorf("SrvNFS:Can't find a 16-bit port number in %v", l.Addr().String())
 	}
 	verbose("listener %T %v addr %v port %v", l, l, l.Addr().String(), portnfs)
 
-	u, err := uuid.NewRandom()
-	if err != nil {
-		return nil, "", err
-	}
-	handler := NewNullAuthHandler(l, COS{mem}, u.String())
+	handler := NewNullAuthHandler(l, fs, u.String())
 	verbose("uuid is %q", u.String())
 	cacheHelper := nfshelper.NewCachingHandler(handler, 1024*1024)
 	f := func() error {
