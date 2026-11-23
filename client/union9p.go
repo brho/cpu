@@ -79,7 +79,7 @@ func NewUnionMount(w []string, m p9.File) UnionMount {
 // any walk []string and hence acts as a default.
 //
 // For example, in Sidecore, the code looks like this:
-// home, err := NewCPU9P(...)
+// home, err := NewCPU9P(...).Attach()
 // container, err := NewCPIO9(...)
 // m1 := NewUnionMount([]string{"/home"}, home)
 // m2 := NewUnionMount([]string{}, container)

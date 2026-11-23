@@ -375,6 +375,9 @@ func (c *Cmd) Dial() error {
 	// Note: cl.Listen returns a TCP listener with network "tcp"
 	// or variants. This lets us use a listen deadline.
 	if c.Ninep {
+		if c.fileServer == nil {
+			c.fileServer = NewCPU9P(c.Root)
+		}
 		l, err := cl.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			// If ipv4 isn't available, try ipv6.  It's not enough
@@ -464,11 +467,6 @@ func (c *Cmd) Start() error {
 
 	if err := c.SetEnv(c.Env...); err != nil {
 		return err
-	}
-
-	// if they did not set an attacher, provide a default one
-	if c.fileServer == nil {
-		c.fileServer = &CPU9P{path: c.Root}
 	}
 
 	if c.SessionIn, err = c.session.StdinPipe(); err != nil {

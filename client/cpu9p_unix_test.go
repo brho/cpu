@@ -2,24 +2,41 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !windows && !plan9
-// +build !windows,!plan9
+//go:build unix
 
 package client
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
-
-	"path/filepath"
 	"testing"
 
 	"github.com/hugelgupf/p9/p9"
 	"golang.org/x/sys/unix"
 )
 
+// preserveUmask restores the process umask cleared by localfs.Attach.
+func preserveUmask(t *testing.T) {
+	t.Helper()
+	old := unix.Umask(0)
+	unix.Umask(old)
+	t.Cleanup(func() {
+		unix.Umask(old)
+	})
+}
+
+func TestTranslatePlatformOpenFlagsUnix(t *testing.T) {
+	got := translateOpenFlags(p9.ReadOnly | p9DotlNonblock | p9DotlDirectory | p9DotlNofollow)
+	want := p9.OpenFlags(os.O_RDONLY | unix.O_NOCTTY | unix.O_NONBLOCK | unix.O_DIRECTORY | unix.O_NOFOLLOW)
+	if got != want {
+		t.Fatalf("translateOpenFlags = %#x, want %#x", got, want)
+	}
+}
+
 func Test9pUnix(t *testing.T) {
+	preserveUmask(t)
 	d := t.TempDir()
 	f := filepath.Join(d, "a")
 	if err := os.WriteFile(f, []byte("hi"), 0666); err != nil {
@@ -43,8 +60,13 @@ func Test9pUnix(t *testing.T) {
 		DataVersion: true,
 	}
 
-	c := &CPU9P{
-		path: f,
+	root, err := NewCPU9P(d).Attach()
+	if err != nil {
+		t.Fatalf("Attach(%q): %v", d, err)
+	}
+	_, c, err := root.Walk([]string{"a"})
+	if err != nil {
+		t.Fatalf(`Walk(["a"]): %v`, err)
 	}
 
 	q, gm, ga, err := c.GetAttr(m)
@@ -200,37 +222,19 @@ func Test9pUnix(t *testing.T) {
 
 }
 
-func Test9pRemove(t *testing.T) {
-	d := t.TempDir()
-	f := filepath.Join(d, "a")
-	if err := os.WriteFile(f, []byte("hi"), 0666); err != nil {
-		t.Fatalf(`os.WriteFile(%q, "hi", 0666): %v != nil`, f, err)
-	}
-	c := &CPU9P{
-		path: f,
-	}
-
-	err := c.Remove()
-	if err != nil {
-		t.Errorf("Remove: %v != nil", err)
-	}
-	if _, err := os.Stat(f); err == nil {
-		t.Errorf("After removing file: os.Stat(%q): got nil, want err", f)
-	}
-}
-
 func Test9pUnlinkat(t *testing.T) {
+	preserveUmask(t)
 	d := t.TempDir()
 	f := filepath.Join(d, "a")
 	if err := os.WriteFile(f, []byte("hi"), 0666); err != nil {
 		t.Fatalf(`os.WriteFile(%q, "hi", 0666): %v != nil`, f, err)
 	}
-	c := &CPU9P{
-		path: d,
+	c, err := NewCPU9P(d).Attach()
+	if err != nil {
+		t.Fatalf("Attach(%q): %v", d, err)
 	}
 
-	err := c.UnlinkAt("a", 0)
-	if err != nil {
+	if err := c.UnlinkAt("a", 0); err != nil {
 		t.Errorf("UnlinkAt: %v != nil", err)
 	}
 	if _, err := os.Stat(f); err == nil {
@@ -239,24 +243,28 @@ func Test9pUnlinkat(t *testing.T) {
 }
 
 func Test9pRenameAt(t *testing.T) {
+	preserveUmask(t)
 	d := t.TempDir()
 	f := filepath.Join(d, "a")
 	if err := os.WriteFile(f, []byte("hi"), 0666); err != nil {
 		t.Fatalf(`os.WriteFile(%q, "hi", 0666): %v != nil`, f, err)
 	}
-	c := &CPU9P{
-		path: filepath.Join(d, "nd"),
+	ndPath := filepath.Join(d, "nd")
+	if err := os.Mkdir(ndPath, 0777); err != nil {
+		t.Fatalf("Mkdir(%q, 0777): %v != nil", ndPath, err)
 	}
-	if err := os.Mkdir(c.path, 0777); err != nil {
-		t.Fatalf("Mkdir(%q, 0777): %v != nil", c.path, err)
+	oldPath, err := NewCPU9P(d).Attach()
+	if err != nil {
+		t.Fatalf("Attach(%q): %v", d, err)
 	}
-	oldPath := &CPU9P{
-		path: d,
+	_, c, err := oldPath.Walk([]string{"nd"})
+	if err != nil {
+		t.Fatalf(`Walk(["nd"]): %v`, err)
 	}
 	if err := oldPath.RenameAt("a", c, "z"); err != nil {
-		t.Errorf("RenameAt(%q, %q, \"z\"): %v != nil", f, c.path, err)
+		t.Errorf("RenameAt(%q, %q, \"z\"): %v != nil", f, ndPath, err)
 	}
-	newFile := filepath.Join(c.path, "z")
+	newFile := filepath.Join(ndPath, "z")
 	if _, err := os.Stat(newFile); err != nil {
 		t.Errorf("os.Stat(%q): %v != nil", newFile, err)
 	}
